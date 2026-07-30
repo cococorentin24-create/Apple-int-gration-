@@ -4514,6 +4514,58 @@ let _appleSearchTimer = null;
 let _appleSearchGen = 0;
 let appleLinks = {}; // cache { appleTrackId: {title,artist,album,artwork,url} }
 
+// L'endpoint itunes.apple.com/search ne renvoie pas toujours des en-têtes
+// CORS exploitables par fetch() selon le navigateur/contexte (Safari,
+// PWA installée, etc.) — c'est justement pour ça qu'Apple prend en charge
+// un paramètre `callback` (JSONP) sur cet endpoint : le chargement se fait
+// via une balise <script>, qui n'est jamais soumise à CORS. On tente donc
+// JSONP en premier, et on garde fetch() en repli au cas où JSONP serait
+// bloqué (rare, mais les deux mécanismes ne dépendent d'aucune techno commune).
+let _jsonpCounter = 0;
+function _jsonpRequest(url, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const cbName = '_jsonp_cb_' + (++_jsonpCounter) + '_' + Date.now();
+    const script = document.createElement('script');
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('JSONP timeout'));
+    }, timeoutMs);
+    function cleanup() {
+      clearTimeout(timer);
+      try { delete window[cbName]; } catch(e) { window[cbName] = undefined; }
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
+    window[cbName] = (data) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(data);
+    };
+    script.onerror = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('JSONP script error'));
+    };
+    const sep = url.includes('?') ? '&' : '?';
+    script.src = url + sep + 'callback=' + cbName;
+    document.head.appendChild(script);
+  });
+}
+async function _iTunesFetch(url) {
+  try {
+    return await _jsonpRequest(url);
+  } catch(e) {
+    // Repli : fetch classique si JSONP échoue pour une raison quelconque
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('iTunes fetch not ok: ' + res.status);
+    return await res.json();
+  }
+}
+
 async function _loadAppleLinks() {
   try { const rec = await dbGet(STORE_META, 'apple_links'); if (rec?.data) appleLinks = rec.data; } catch(e) {}
 }
@@ -4538,13 +4590,12 @@ async function searchAppleMusic(q) {
   songsEl.innerHTML = `<div style="padding:14px 20px;color:var(--text3);font-size:13px">Recherche…</div>`;
   artistsEl.innerHTML = '';
   try {
-    const [songsRes, artistsRes] = await Promise.all([
-      fetch('https://itunes.apple.com/search?' + new URLSearchParams({ term:q, media:'music', entity:'song', limit:'12' })),
-      fetch('https://itunes.apple.com/search?' + new URLSearchParams({ term:q, media:'music', entity:'musicArtist', limit:'8' }))
+    const songsUrl = 'https://itunes.apple.com/search?' + new URLSearchParams({ term:q, media:'music', entity:'song', limit:'12' });
+    const artistsUrl = 'https://itunes.apple.com/search?' + new URLSearchParams({ term:q, media:'music', entity:'musicArtist', limit:'8' });
+    const [songsData, artistsData] = await Promise.all([
+      _iTunesFetch(songsUrl).catch(()=>({results:[]})),
+      _iTunesFetch(artistsUrl).catch(()=>({results:[]}))
     ]);
-    if (gen !== _appleSearchGen) return;
-    const songsData = songsRes.ok ? await songsRes.json() : {results:[]};
-    const artistsData = artistsRes.ok ? await artistsRes.json() : {results:[]};
     if (gen !== _appleSearchGen) return;
     const songs = songsData.results || [];
     const artistsRaw = (artistsData.results || []).filter(a => a.artistName);
@@ -4726,8 +4777,8 @@ async function _renderAppleArtistPage(a, isFresh) {
     </div>
   `;
   try {
-    const res = await fetch('https://itunes.apple.com/lookup?' + new URLSearchParams({ id:a.id, entity:'song', limit:'50' }));
-    const data = await res.json();
+    const lookupUrl = 'https://itunes.apple.com/lookup?' + new URLSearchParams({ id:a.id, entity:'song', limit:'50' });
+    const data = await _iTunesFetch(lookupUrl);
     const songs = (data.results || []).filter(r => r.wrapperType === 'track');
     const tracksEl = $('ap-artist-tracks');
     if (!tracksEl) return; // l'utilisateur a peut-être navigué ailleurs entre temps
