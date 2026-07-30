@@ -2182,6 +2182,38 @@ body {
 
 <script>
 'use strict';
+// ─── PURGE SERVICE WORKER ACTIF (auto-guérison, une seule fois) ──────
+// Un Service Worker déjà actif (ex: laissé par une version précédente
+// de l'app) contrôle et intercepte TOUTES les requêtes réseau de la
+// page — y compris les fetch() et les <script> JSONP vers l'API Apple —
+// et peut les faire échouer si sa logique interne (cache/fetch handler)
+// ne reconnaît pas ces URLs ("FetchEvent.respondWith received an error").
+// navigator.serviceWorker.unregister() ne prend effet qu'à la PROCHAINE
+// navigation, jamais sur la page déjà chargée qu'il contrôle — un simple
+// appel ne suffit donc pas ici. On force un rechargement unique dès
+// qu'un contrôleur actif est détecté, avec un garde-fou sessionStorage
+// pour ne jamais boucler, afin que la session reparte sans interception.
+(function () {
+  try {
+    if (!('serviceWorker' in navigator)) return;
+    if (navigator.serviceWorker.controller && !sessionStorage.getItem('_swPurged')) {
+      sessionStorage.setItem('_swPurged', '1');
+      navigator.serviceWorker.getRegistrations()
+        .then(regs => Promise.all(regs.map(r => r.unregister())))
+        .catch(() => {})
+        .finally(() => location.reload());
+    } else {
+      // Pas de contrôleur actif sur cette page (ou déjà purgé cette
+      // session) — on nettoie quand même tout enregistrement résiduel
+      // pour que les prochaines navigations ne soient jamais interceptées,
+      // sans recharger celle-ci.
+      navigator.serviceWorker.getRegistrations()
+        .then(regs => regs.forEach(r => r.unregister()))
+        .catch(() => {});
+    }
+  } catch(e) {}
+})();
+
 // ═══════════════════════════════════════════════════════════
 //  COCO MUSIC — ENGINE v3
 //  Fix: IndexedDB persistence, keyboard UI, playlist add,
@@ -5618,7 +5650,5 @@ init();
     });
   }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-<script>eruda.init();</script>
 </body>
 </html>
