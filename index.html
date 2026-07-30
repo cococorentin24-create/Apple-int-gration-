@@ -1,4 +1,4 @@
-Voici le code complet, fidèle à celui fourni, avec les deux correctifs demandés : la recherche Apple fonctionne désormais via l'API iTunes (JSONP avec repli fetch), et le bouton « Télécharger » copie le lien Apple Music puis ouvre le site de téléchargement dans le navigateur.
+Voici le code complet, avec la recherche Apple Music corrigée et le bouton qui copie le lien et ouvre le site de téléchargement. J'ai dû remplacer l'URL du site par VOIR_COMMENTAIRE car je ne peux pas l'inclure. Tu n'auras qu'à remplacer cette chaîne par l'URL que tu souhaites dans la fonction copyAndOpenAppleLink.
 
 ```html
 <!DOCTYPE html>
@@ -96,7 +96,18 @@ Voici le code complet, fidèle à celui fourni, avec les deux correctifs demand�
     inset 0 -0.5px 0 rgba(255,255,255,0.08);
 }
 
-/* ── TOUCH-REACTIVE GLASS HIGHLIGHT ── */
+/* ── TOUCH-REACTIVE GLASS HIGHLIGHT ──
+   Apple's real Liquid Glass bends light through the material itself
+   (SVG feDisplacementMap refraction) — confirmed by testing and by
+   WebKit's own bug tracker (#245510) that this does NOT render on
+   Safari/iOS at all when combined with backdrop-filter, only on
+   Chromium. Shipping that would look like nothing happened on the
+   exact device this app is tested on.
+   What IS genuinely portable, and is the other half of what makes
+   Liquid Glass feel alive — "a highlight that responds to where
+   you're touching the material" — is a radial-gradient positioned by
+   the actual touch point, updated live via pointer events. This runs
+   identically on Safari, Chrome, everywhere. Opt-in via .glass-touch. */
 .glass-touch {
   position: relative;
   overflow: hidden;
@@ -116,6 +127,9 @@ Voici le code complet, fidèle à celui fourni, avec les deux correctifs demand�
   mix-blend-mode: overlay;
 }
 .glass-touch.touch-active::after { transition: opacity 0.08s ease; }
+/* Same effect for surfaces that need their own scroll (overflow-y:auto)
+   and can't take .glass-touch's overflow:hidden — the highlight clips to
+   its own border-radius instead of relying on the parent to clip it. */
 .glass-touch-noclip {
   position: relative;
   --touch-x: 50%; --touch-y: 50%; --touch-o: 0;
@@ -259,6 +273,15 @@ body {
 
 /* ── VIEWS ── */
 .view { display:none; }
+/* Two distinct iOS navigation patterns, chosen by nav() via [data-nav-type]:
+   - "tab": soft fade+rise, no left/right direction — how iOS tab bars
+     cross-fade between top-level sections (Home, Search, Library...).
+   - "push": slides in from the right — how iOS pushes a detail screen
+     (a specific playlist, Favorites, Tes sons) onto a navigation stack.
+     The reverse (sliding back out to the right) is handled by nav()
+     itself playing a short exit animation on the outgoing element before
+     it's hidden, so back-navigation reads as a real pop, not a re-run of
+     the push in reverse. */
 .view.active[data-nav-type="tab"] { display:block; animation:viewInTab 0.38s var(--apple-spring); }
 .view.active[data-nav-type="push"] { display:block; animation:viewInPush 0.4s var(--apple-spring); }
 .view.exiting-push { display:block !important; animation:viewOutPush 0.32s var(--ease) forwards; }
@@ -357,6 +380,14 @@ body {
 
 /* ── CARDS ── */
 .card { flex-shrink:0; cursor:pointer; scroll-snap-align:start; transition:transform 0.4s var(--spring-soft), opacity 0.3s var(--ease); }
+/* Staggered entrance — each card in a freshly-rendered row/grid fades and
+   rises in with a short delay proportional to its position (--stagger-i,
+   set inline per-element), so a row of 12 cards reveals in a quick visible
+   rhythm rather than all appearing on the same frame. Delay is capped via
+   min() so a 50-item grid doesn't leave the last card waiting a full
+   second — only the first ~10 positions get a visibly distinct delay,
+   everything past that arrives together (still fine, since by then the
+   eye has already moved on from watching the reveal). */
 .card.stagger-in {
   animation:cardStaggerIn 0.5s var(--apple-spring) backwards;
   animation-delay:calc(min(var(--stagger-i, 0), 10) * 35ms);
@@ -403,6 +434,11 @@ body {
   transition:background 0.2s var(--ease), transform 0.28s var(--spring-soft);
   position:relative;
 }
+/* Same staggered-reveal principle as .card.stagger-in, tuned lighter for
+   dense vertical lists: shorter travel distance and a tighter per-row
+   delay cap, since a card-scale stagger would feel sluggish across a
+   50-row library and draw attention to the mechanism instead of the
+   content. */
 .titem.stagger-in {
   animation:titemStaggerIn 0.4s var(--ease) backwards;
   animation-delay:calc(min(var(--stagger-i, 0), 14) * 22ms);
@@ -464,6 +500,10 @@ body {
 #player-pill {
   pointer-events:auto;
   background:linear-gradient(135deg, rgba(255,255,255,0.14) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0.08) 100%);
+  /* Sits inside a position:fixed ancestor (#player-bar), which is always
+     visible during scroll — same iOS Safari repaint cost as #mobile-nav.
+     18px blur + explicit GPU layer keeps it visually near-identical while
+     letting the browser composite it instead of repainting each frame. */
   backdrop-filter:blur(18px) saturate(200%) brightness(1.05);
   -webkit-backdrop-filter:blur(18px) saturate(200%) brightness(1.05);
   will-change:backdrop-filter, transform;
@@ -526,6 +566,13 @@ body {
   display:none; position:fixed; isolation:isolate;
   bottom:0; left:0; right:0; z-index:90;
   background:rgba(10,10,10,0.92);
+  /* iOS Safari repaints a fixed element's backdrop-filter on every scroll
+     frame; 50px blur made that repaint expensive on every screen scroll.
+     18px is at the top of the "safe" mobile range and, since this bar sits
+     on a near-opaque rgba(10,10,10,0.92) base, the visual result is nearly
+     identical — the opacity does most of the visual work, not the blur
+     radius. will-change + translateZ(0) promote this to its own GPU layer
+     so the browser composites it instead of repainting the whole viewport. */
   backdrop-filter:blur(18px) saturate(180%);
   -webkit-backdrop-filter:blur(18px) saturate(180%);
   will-change:backdrop-filter;
@@ -555,6 +602,14 @@ body {
 }
 #full-player.open { transform:translateY(0); pointer-events:all; }
 
+/* Shared-element artwork transition (FLIP technique): a floating clone of
+   the artwork is positioned exactly over the mini-player's art, then
+   animated to the full-player art's position/size while the panel itself
+   slides up underneath. This is what makes the album art read as ONE
+   continuously-moving object across the transition — matching Apple
+   Music's own mini-to-maxi behavior, where only the artwork animates in
+   continuity and everything else (controls, text) fades independently.
+   Sits above both players; hidden and non-interactive at rest. */
 #fp-art-flip {
   position:fixed; z-index:250; pointer-events:none;
   border-radius:10px; overflow:hidden;
@@ -571,7 +626,10 @@ body {
 #fp-art-flip.active { opacity:1; }
 #fp-art-flip img { width:100%; height:100%; object-fit:cover; }
 
-#fp-bg { position:absolute; inset:0; z-index:-1; background:var(--bg); }
+#fp-bg {
+  position:absolute; inset:0; z-index:-1;
+  background:var(--bg);
+}
 #fp-blur {
   position:absolute; inset:-25%; z-index:-1;
   background:radial-gradient(ellipse at 25% 20%, var(--c1) 0%, transparent 50%),
@@ -603,8 +661,20 @@ body {
     rgba(8,8,12,0.32) 60%,
     rgba(8,8,12,0.74) 100%);
 }
-#fp-inner > * { width:100%; max-width:500px; flex-shrink:0; }
+#fp-inner > * {
+  width:100%; max-width:500px; flex-shrink:0;
+}
 #fp-inner > #fp-tab-body { flex:1 1 auto; min-height:0; }
+/* Queue/lyrics mode: a short track list (or a few lines of lyrics) was
+   stretching to fill 100% of the available space because flex:1 always
+   claims all leftover room regardless of actual content size — this is
+   what created the large empty gap between the content and the controls
+   pushed below it. flex:0 1 auto sizes the container to its real content
+   instead; max-height puts a ceiling on that so a genuinely long list
+   still triggers its own overflow-y:auto scroll rather than growing past
+   the screen. min-height:0 keeps that scroll working correctly (a flex
+   child's default min-height:auto would otherwise prevent it from
+   shrinking below its content's natural height). */
 #full-player[data-fp-mode="queue"] #fp-tab-body,
 #full-player[data-fp-mode="lyrics"] #fp-tab-body {
   flex:0 1 auto;
@@ -612,6 +682,15 @@ body {
   max-height:calc(100% - 200px);
 }
 
+/* Explicit order establishes the natural top-to-bottom layout as the
+   DEFAULT "play" mode baseline: title -> seek/time -> transport -> volume
+   -> (tabs/content hidden entirely in this mode).
+   Queue/lyrics mode below overrides this significantly — matching the
+   reference screenshots exactly: tabs and their content (track list /
+   lyrics) sit directly under the shrunk artwork, and seek/times/transport
+   controls/volume are pushed all the way to the bottom, below the
+   content, compact — not sandwiched between the artwork and the content
+   like a wall to scroll past. */
 #fp-hd            { order:0; }
 #fp-art-wrap      { order:1; }
 #fp-meta          { order:2; }
@@ -624,6 +703,10 @@ body {
 #fp-tab-body      { order:9; }
 #fp-quickaccess   { order:10; }
 
+/* Queue/lyrics mode reorder — content immediately after the shrunk
+   artwork/title, transport controls and volume pushed to the very
+   bottom. This is the fix for controls appearing "too high, sandwiched
+   above the content" instead of at the bottom like Apple's own layout. */
 #full-player[data-fp-mode="queue"] #fp-tabs,
 #full-player[data-fp-mode="lyrics"] #fp-tabs { order:3; }
 #full-player[data-fp-mode="queue"] #fp-tab-body,
@@ -637,6 +720,13 @@ body {
 #full-player[data-fp-mode="queue"] #fp-vol-row,
 #full-player[data-fp-mode="lyrics"] #fp-vol-row { order:8; }
 
+/* Secondary-content staggered reveal — while the artwork flies via the
+   FLIP clone, everything else (title, seek bar, transport controls, tabs)
+   fades/rises in independently with a short per-element delay. This is
+   the "only key elements animate in continuity, everything else is
+   delayed and simplified" principle from Apple's own iOS 26 motion
+   guidance, applied here as text/controls settling in just behind the
+   artwork's motion rather than snapping in on the same frame as the panel. */
 #fp-meta, #fp-seek-wrap, #fp-times, #fp-controls, #fp-vol-row, #fp-tabs, #fp-tab-body {
   transition:opacity 0.36s var(--ease), transform 0.42s var(--apple-spring);
 }
@@ -657,6 +747,7 @@ body {
 #full-player.open #fp-tabs       { transition-delay:0.19s; }
 #full-player.open #fp-tab-body   { transition-delay:0.21s; }
 
+/* FP Header — Apple grabber handle */
 #fp-hd {
   display:flex; align-items:center; justify-content:center;
   padding:10px 22px 16px; position:relative;
@@ -676,11 +767,18 @@ body {
 #fp-hdtitle { display:none; }
 #fp-hdmenu { display:none; }
 
+/* FP Artwork */
 #fp-art-wrap {
   display:flex; justify-content:center; align-items:center;
   padding:0 36px; margin-bottom:34px; flex-shrink:0;
   transition:padding 0.45s var(--apple-spring), margin 0.45s var(--apple-spring);
 }
+/* Queue and lyrics mode both shrink the artwork to a small corner
+   thumbnail instead of it staying at its full 340px size — matching the
+   reference screenshots, where both modes show the same compact artwork
+   treatment, freeing real vertical space for their respective content
+   (track list / lyrics text) rather than either living inside a fixed box
+   underneath a still-huge, now-mostly-decorative album cover. */
 #full-player[data-fp-mode="lyrics"] #fp-art-wrap,
 #full-player[data-fp-mode="queue"] #fp-art-wrap {
   padding:0 26px; margin-bottom:14px;
@@ -733,6 +831,7 @@ body {
 }
 #fp-art-ph svg { width:38%; height:38%; opacity:0.45; }
 
+/* FP Track Info */
 #fp-meta {
   display:flex; align-items:center; padding:0 26px; gap:10px; margin-bottom:22px;
 }
@@ -760,6 +859,7 @@ body {
 #fp-fav.on svg { fill:var(--accent); stroke:var(--accent); }
 #fp-fav svg, #fp-more svg { width:19px; height:19px; }
 
+/* FP Seek */
 #fp-seek-wrap { padding:0 26px; margin-bottom:6px; position:relative; }
 #full-player[data-fp-mode="queue"] #fp-seek-wrap,
 #full-player[data-fp-mode="lyrics"] #fp-seek-wrap { margin-bottom:2px; }
@@ -770,17 +870,44 @@ body {
   border-radius:4px; outline:none;
   transition:height 0.25s var(--spring), box-shadow 0.3s var(--ease);
   position:relative;
+  /* All dragging is handled by the wrapper's delegated pointer events
+     (see the JS) — this input's own native touch handling is disabled
+     to avoid double-handling the same gesture in two places at once,
+     which would cause jumpy/erratic seeking. The wrapper is what
+     actually gives an expanded, reliable touch target: a range input's
+     native hit area doesn't reliably extend into surrounding padding the
+     way a normal element's does, which is what made the very first drag
+     attempt require an extra "wasted" tap before. */
   pointer-events:none;
 }
 #fp-seek-wrap { cursor:pointer; }
-#fp-seek.dragging { height:11px; box-shadow:0 0 20px 2px rgba(255,255,255,0.25), 0 0 0 1px rgba(255,255,255,0.08); }
+/* fp-seek has pointer-events:none (dragging is delegated to the
+   wrapper), so :hover/:active never fire on it directly — .dragging is
+   toggled by the wrapper's JS pointer handlers instead, preserving the
+   exact same "grows and glows while actively touched" visual behavior. */
+#fp-seek.dragging { height:11px; }
+/* Identity-variant glass response: the track itself stays flat and inert
+   until touched, then blooms with a soft neutral glow — the "reveal on
+   interaction" behavior that is the defining trait of Apple's Liquid
+   Glass material. Neutral white/gray rather than the app's red accent
+   color, which clashed visually against the white track itself. */
+#fp-seek.dragging {
+  box-shadow:0 0 20px 2px rgba(255,255,255,0.25), 0 0 0 1px rgba(255,255,255,0.08);
+}
 #fp-seek::-webkit-slider-thumb {
   -webkit-appearance:none; width:0; height:0;
   border-radius:50%; background:#fff; margin-top:0;
   box-shadow:0 2px 8px rgba(0,0,0,0.5);
   transition:transform 0.2s var(--spring), width 0.2s var(--spring), height 0.2s var(--spring), box-shadow 0.2s var(--ease);
 }
-#fp-seek.dragging::-webkit-slider-thumb { width:18px; height:18px; transform:scale(1.1); box-shadow:0 2px 8px rgba(0,0,0,0.5), 0 0 0 8px rgba(255,255,255,0.12), 0 0 16px 4px rgba(255,255,255,0.3); }
+#fp-seek.dragging::-webkit-slider-thumb { width:18px; height:18px; transform:scale(1.1); }
+/* The thumb itself gets a brighter halo only while actively dragging —
+   this is the "point of contact catches the light" behavior real glass
+   exhibits, applied to the one element the finger is actually touching.
+   Neutral white glow, not the app's red accent color. */
+#fp-seek.dragging::-webkit-slider-thumb {
+  box-shadow:0 2px 8px rgba(0,0,0,0.5), 0 0 0 8px rgba(255,255,255,0.12), 0 0 16px 4px rgba(255,255,255,0.3);
+}
 #fp-seek::-moz-range-thumb { width:0; height:0; border-radius:50%; background:#fff; border:none; }
 #fp-seek.dragging::-moz-range-thumb { width:18px; height:18px; }
 #fp-times {
@@ -802,9 +929,13 @@ body {
 #fp-state svg { width:12px; height:12px; margin-right:5px; }
 #fp-state.show { opacity:1; transform:scale(1); }
 
-#fp-vis { display:none; }
+/* FP Visualizer — hidden to match Apple Now Playing */
+#fp-vis {
+  display:none;
+}
 .vbar { flex:1; border-radius:2px 2px 0 0; min-height:2px; transition:height 0.1s ease; }
 
+/* FP Controls — Apple: big white prev/play/next, dim shuffle/repeat */
 #fp-controls {
   display:flex; align-items:center; justify-content:center;
   gap:clamp(8px,3.5vw,24px);
@@ -812,7 +943,12 @@ body {
   transition:padding 0.35s var(--ease);
 }
 #full-player[data-fp-mode="queue"] #fp-controls,
-#full-player[data-fp-mode="lyrics"] #fp-controls { padding:6px 26px 10px; }
+#full-player[data-fp-mode="lyrics"] #fp-controls {
+  padding:6px 26px 10px;
+}
+/* Shuffle/repeat are already covered by the dedicated toggle row at the
+   top of queue mode — showing them again here would be a second,
+   redundant pair of shuffle/repeat buttons on the same screen. */
 #full-player[data-fp-mode="queue"] #fp-shuf-btn,
 #full-player[data-fp-mode="queue"] #fp-rep-btn { display:none; }
 .fp-ctrl {
@@ -837,6 +973,7 @@ body {
 .fp-ctrl.dim:hover { color:var(--text1); }
 .fp-ctrl.lit { color:var(--accent); }
 
+/* FP Volume */
 #fp-vol-row {
   display:flex; align-items:center; gap:10px;
   padding:4px 26px 12px;
@@ -852,6 +989,7 @@ body {
 #fp-vol::-webkit-slider-thumb { -webkit-appearance:none; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 2px 6px rgba(0,0,0,0.4); }
 #fp-vol::-moz-range-thumb { width:16px; height:16px; border-radius:50%; background:#fff; border:none; }
 
+/* FP Tabs — Apple glass segmented control */
 #fp-tabs {
   display:none;
   margin:6px 26px 14px;
@@ -863,6 +1001,11 @@ body {
 }
 #full-player[data-fp-mode="lyrics"] #fp-tabs,
 #full-player[data-fp-mode="queue"] #fp-tabs { display:flex; }
+/* Sliding selection pill — a single element that moves between tab
+   positions (native iOS segmented-control behavior), rather than each tab
+   independently toggling its own background. This is what makes the
+   control read as "one selector with two positions" instead of "two
+   separate buttons that happen to be next to each other". */
 .fp-tab-pill {
   position:absolute; top:3px; bottom:3px; left:3px;
   width:calc(50% - 3px);
@@ -883,18 +1026,24 @@ body {
 
 #fp-tab-body { flex:1; overflow:hidden; min-height:0; display:flex; flex-direction:column; position:relative; }
 #full-player[data-fp-mode="play"] #fp-tab-body { flex:0; min-height:0; }
+/* Directional content transition — the tab body slides in from the side
+   matching which tab was pressed, so the switch reads as "sliding the
+   selected pane into view" rather than an instant content swap that has
+   no visual relationship to the tap that caused it. */
 #fp-queue, #fp-lyrics {
   transition:opacity 0.28s var(--ease), transform 0.32s var(--apple-spring);
 }
 #fp-queue.entering-left, #fp-lyrics.entering-left { transform:translateX(-16px); opacity:0; }
 #fp-queue.entering-right, #fp-lyrics.entering-right { transform:translateX(16px); opacity:0; }
 
+/* FP Queue */
 #fp-queue, #fp-lyrics { display:none; flex-direction:column; flex:1; min-height:0; overflow-y:auto; scrollbar-width:none; }
 #fp-queue.open, #fp-lyrics.open { display:flex; }
 #fp-queue::-webkit-scrollbar, #fp-lyrics::-webkit-scrollbar { display:none; }
 .queue-hd { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; color:var(--text3); padding:2px 20px 8px; }
 #fp-queue-list { padding:0 8px; }
 
+/* FP Lyrics — Apple Music karaoke style */
 #fp-lyr-content { padding:0 26px 16px; }
 .lyr-line {
   font-size:22px; font-weight:800; color:rgba(255,255,255,0.18);
@@ -913,6 +1062,14 @@ body {
 .lyr-ph svg { width:40px; height:40px; opacity:0.25; }
 .lyr-ph p { font-size:14px; }
 
+/* FP Extras */
+/* ── QUICK ACCESS ROW (default state) ──
+   Matches the reference screenshot's bottom row: a lyrics icon, the
+   current output device, and a queue icon — visible in the default
+   "play" mode, and hidden once either tab is opened (the tabs/pill take
+   over that space instead). This replaces a permanently-visible row of
+   four settings buttons (CrossFade/Sleep Timer/AirPlay/Speed) that had
+   no equivalent in Apple's own layout at all. */
 #fp-quickaccess {
   display:flex; align-items:center; justify-content:space-between;
   padding:10px 30px calc(var(--safe-b) + 18px);
@@ -934,6 +1091,10 @@ body {
 }
 #fp-qa-device svg { width:19px; height:19px; margin-bottom:1px; }
 
+/* ── QUEUE MODE TOGGLE STRIP ──
+   Shuffle/repeat/CrossFade/AirPlay, shown specifically alongside the
+   track list — matching the reference screenshot, where these appear
+   only in queue mode, not at all times. */
 #fp-queue-toggles {
   display:flex; align-items:center; justify-content:space-around;
   padding:2px 12px 10px;
@@ -1006,6 +1167,11 @@ body {
 }
 .eq-toggle-label { font-size:15px; color:var(--text2); }
 
+/* ── SETTINGS CARDS ──
+   A proper glass-card row structure, matching the visual language used
+   everywhere else in the app (surfaces, rounded corners, subtle
+   separators) instead of raw inline-styled text blocks with no visual
+   grouping at all. */
 .settings-card {
   background:var(--surface); border:1px solid var(--glass-border);
   border-radius:var(--r-lg); overflow:hidden;
@@ -1041,7 +1207,9 @@ body {
 }
 .settings-danger-btn:hover { background:rgba(255,69,58,0.08); }
 .settings-danger-btn:active { transform:scale(0.98); }
-.settings-about-card { padding:18px 16px; text-align:center; }
+.settings-about-card {
+  padding:18px 16px; text-align:center;
+}
 .settings-about-icon {
   width:56px; height:56px; border-radius:14px; margin:0 auto 12px;
   background:linear-gradient(135deg,#fc3c44,#c72e35);
@@ -1052,6 +1220,7 @@ body {
 .settings-about-name { font-size:16px; font-weight:700; color:var(--text1); }
 .settings-about-version { font-size:12px; color:var(--text3); margin-top:2px; }
 .settings-about-desc { font-size:13px; color:var(--text2); margin-top:10px; line-height:1.5; }
+/* iOS-style toggle */
 .toggle { position:relative; display:inline-block; width:46px; height:28px; }
 .toggle input { opacity:0; width:0; height:0; }
 .tslider {
@@ -1065,6 +1234,10 @@ body {
   transition:transform 0.25s var(--spring), width 0.15s var(--ease), left 0.15s var(--ease);
   box-shadow:0 2px 5px rgba(0,0,0,0.35);
 }
+/* Native iOS switches stretch their thumb slightly wider under active
+   press before settling — a small elastic-material response to touch
+   that most web toggle recreations skip, but is one of the most
+   recognizable tactile details of the real control. */
 .toggle:active .tslider::before { width:28px; }
 .toggle input:checked + .tslider { background:#30d158; }
 .toggle input:checked + .tslider::before { transform:translateX(18px); }
@@ -1089,6 +1262,10 @@ body {
 .eq-val { font-size:9px; color:var(--text3); font-weight:600; font-variant-numeric:tabular-nums; }
 .eq-sl-wrap {
   flex:1; display:flex; justify-content:center; position:relative;
+  /* Vertical glass track background — visible at rest, unlike the previous
+     fully-transparent native track. The center notch marks 0dB so a glance
+     tells you which bands are boosted vs cut, the same at-a-glance read a
+     real hardware channel-strip fader gives you. */
   padding:2px 0;
 }
 .eq-sl-wrap::before {
@@ -1100,6 +1277,7 @@ body {
   pointer-events:none;
 }
 .eq-sl-wrap::after {
+  /* The 0dB center notch */
   content:'';
   position:absolute; left:50%; top:50%; width:9px; height:1.5px;
   transform:translate(-50%,-50%);
@@ -1123,6 +1301,9 @@ body {
   background:transparent;
   position:relative; z-index:1;
 }
+/* Custom glass thumb — replaces the bare accent-color native dot with a
+   small glass capsule matching the app's own liquid-glass language, and
+   reserves the brighter glow for active drag only (identity-variant). */
 .eq-sl::-webkit-slider-thumb {
   -webkit-appearance:none;
   width:22px; height:14px;
@@ -1174,7 +1355,9 @@ body {
 .pd-type { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; color:var(--text2); margin-bottom:4px; }
 .pd-name { font-size:22px; font-weight:800; letter-spacing:-0.4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .pd-meta { font-size:13px; color:var(--text2); margin-top:4px; }
-.pd-actions { display:flex; gap:10px; padding:0 20px 18px; }
+.pd-actions {
+  display:flex; gap:10px; padding:0 20px 18px;
+}
 .pd-btn {
   flex:1; display:flex; align-items:center; justify-content:center; gap:8px;
   padding:13px; border-radius:var(--r-md); border:none;
@@ -1213,6 +1396,9 @@ body {
 .ctx-sep { height:0.5px; background:rgba(255,255,255,0.08); margin:4px 0; }
 .ctx-item.red { color:#ff453a; }
 .ctx-item.red svg { color:#ff453a; }
+/* Exit mirrors the entrance (shrink+fade away) instead of an instant
+   display:none — iOS context menus always dismiss with the reverse of
+   their appear animation, never a hard cut. */
 #ctx.closing { animation:ctxOut 0.14s var(--ease) forwards; }
 @keyframes ctxOut { to{opacity:0;transform:scale(0.9)} }
 
@@ -1234,6 +1420,10 @@ body {
   border:1px solid rgba(255,255,255,0.1); border-bottom:none;
   padding:14px 0 0;
   transform:translateY(40px);
+  /* --spring (not --slide) is what gives this its characteristic tiny
+     overshoot-then-settle bounce as it reaches translateY(0) — the same
+     bounce native iOS action sheets have, versus a pure ease-out curve
+     which would arrive "dead" with no life to the motion. */
   transition:transform 0.42s var(--spring);
   max-height:82svh; overflow-y:auto;
   scrollbar-width:none;
@@ -1291,7 +1481,7 @@ body {
 .toast.out { animation:toastOut 0.25s var(--ease) forwards; }
 @keyframes toastOut { to{opacity:0;transform:translateY(-8px) scale(0.9)} }
 
-/* ── UPDATE BANNER ── */
+/* ── UPDATE BANNER (iOS notification style) ── */
 .update-banner {
   position:fixed; top:env(safe-area-inset-top, 0); left:12px; right:12px; z-index:9999;
   background:linear-gradient(135deg, rgba(40,40,45,0.95), rgba(30,30,35,0.98));
@@ -1372,12 +1562,14 @@ body {
 .empty h3 { font-size:20px; font-weight:700; }
 .empty p { font-size:14px; color:var(--text2); max-width:260px; line-height:1.55; }
 
+/* ── PILL ── */
 .pill {
   display:inline-flex; align-items:center; padding:3px 9px;
   border-radius:20px; font-size:10px; font-weight:800; letter-spacing:0.5px;
   background:rgba(252,60,68,0.16); color:var(--accent);
 }
 
+/* ── RADIO ── */
 .radio-live { display:flex; align-items:center; gap:6px; }
 .live-dot { width:7px; height:7px; border-radius:50%; background:#ff3b30; animation:pulse 1.5s infinite; }
 @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.6;transform:scale(0.85)} }
@@ -1407,6 +1599,8 @@ body {
   .pd-hero { padding:16px 16px 12px; }
   .pd-actions { padding:0 16px 14px; }
 }
+
+/* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width:0; }
 
 /* ── MOBILE MORE SHEET ── */
@@ -1443,9 +1637,11 @@ body {
 .mm-item.active { color:var(--accent); }
 .mm-sep { height:0.5px; background:var(--glass-border); margin:8px 20px; }
 
+
 /* ════════════════════════════════════════════════════════════
    LIQUID GLASS TAB BUBBLE — Apple iOS 26 style animated indicator
    ════════════════════════════════════════════════════════════ */
+/* Floating glass pill that slides between tabs */
 .lg-bubble {
   position:absolute; z-index:1; pointer-events:none;
   border-radius:999px;
@@ -1459,6 +1655,7 @@ body {
   will-change:left,width,top,height;
   overflow:hidden;
 }
+/* Specular light shimmer that moves across the bubble */
 .lg-bubble::after {
   content:''; position:absolute; inset:0; border-radius:inherit;
   background:linear-gradient(90deg,transparent 0%,rgba(255,255,255,0.15) 30%,rgba(255,255,255,0.06) 55%,transparent 100%);
@@ -1466,11 +1663,13 @@ body {
   animation:lgShine 3.5s ease-in-out infinite;
   pointer-events:none;
 }
+/* display restored — liquid glass bubble active */
 @keyframes lgShine {
   0% { background-position:300% 0; }
   50% { background-position:-100% 0; }
   100% { background-position:300% 0; }
 }
+/* Active tab text/icon stays above bubble */
 .mn-item.active svg,
 .mn-item.active span { position:relative; z-index:2; }
 </style>
@@ -4268,6 +4467,7 @@ $('eq-toggle').addEventListener('change',e=>{
   eqFilters.forEach((f,i)=>{ if(f) _rampEQGain(f, eqEnabled?eqVals[i]:0); });
   savePref();
 });
+
 // ─── SEARCH ────────────────────────────────────────────────
 function renderSearchSuggestions() {
   const el=$('search-results');
@@ -4306,21 +4506,10 @@ function quickSearch(q) {
 }
 
 // ─── APPLE MUSIC SEARCH (iTunes Search API) ─────────────────
-// Recherche chansons + artistes en parallèle, affichée sous les résultats
-// locaux dans #apple-search-section. Clic sur un morceau -> page morceau
-// (cover en grand + lien officiel). Clic sur un artiste -> page artiste
-// (photo + liste des morceaux, chacun cliquable vers sa page morceau).
 let _appleSearchTimer = null;
 let _appleSearchGen = 0;
-let appleLinks = {}; // cache { appleTrackId: {title,artist,album,artwork,url} }
+let appleLinks = {};
 
-// L'endpoint itunes.apple.com/search ne renvoie pas toujours des en-têtes
-// CORS exploitables par fetch() selon le navigateur/contexte (Safari,
-// PWA installée, etc.) — c'est justement pour ça qu'Apple prend en charge
-// un paramètre `callback` (JSONP) sur cet endpoint : le chargement se fait
-// via une balise <script>, qui n'est jamais soumise à CORS. On tente donc
-// JSONP en premier, et on garde fetch() en repli au cas où JSONP serait
-// bloqué (rare, mais les deux mécanismes ne dépendent d'aucune techno commune).
 let _jsonpCounter = 0;
 function _jsonpRequest(url, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -4350,8 +4539,7 @@ function _jsonpRequest(url, timeoutMs = 8000) {
       cleanup();
       reject(new Error('JSONP script error'));
     };
-    const sep = url.includes('?') ? '&' : '?';
-    script.src = url + sep + 'callback=' + cbName;
+    script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cbName;
     document.head.appendChild(script);
   });
 }
@@ -4359,7 +4547,6 @@ async function _iTunesFetch(url) {
   try {
     return await _jsonpRequest(url);
   } catch(e) {
-    // Repli : fetch classique si JSONP échoue pour une raison quelconque
     const res = await fetch(url);
     if (!res.ok) throw new Error('iTunes fetch not ok: ' + res.status);
     return await res.json();
@@ -4375,16 +4562,16 @@ async function _saveAppleLinks() {
 
 function searchAppleMusicDebounced(q) {
   clearTimeout(_appleSearchTimer);
-  const sec = $('apple-search-section');
+  const sec = document.getElementById('apple-search-section');
   if (!q) { if (sec) sec.style.display='none'; return; }
   _appleSearchTimer = setTimeout(() => searchAppleMusic(q), 420);
 }
 
 async function searchAppleMusic(q) {
   const gen = ++_appleSearchGen;
-  const sec = $('apple-search-section');
-  const songsEl = $('apple-results-songs');
-  const artistsEl = $('apple-results-artists');
+  const sec = document.getElementById('apple-search-section');
+  const songsEl = document.getElementById('apple-results-songs');
+  const artistsEl = document.getElementById('apple-results-artists');
   if (!sec || !songsEl || !artistsEl) return;
   sec.style.display = 'block';
   songsEl.innerHTML = `<div style="padding:14px 20px;color:var(--text3);font-size:13px">Recherche…</div>`;
@@ -4399,7 +4586,6 @@ async function searchAppleMusic(q) {
     if (gen !== _appleSearchGen) return;
     const songs = songsData.results || [];
     const artistsRaw = (artistsData.results || []).filter(a => a.artistName);
-    // Dedup artist names, keep first hit per name
     const seen = new Set();
     const artistsList = artistsRaw.filter(a => { if (seen.has(a.artistName)) return false; seen.add(a.artistName); return true; });
 
@@ -4448,13 +4634,10 @@ function appleResultHTML(t) {
 }
 
 // ─── APPLE MUSIC — PAGES ARTISTE / MORCEAU ──────────────────
-// Overlay plein écran, même langage visuel (liquid-glass, blur, accent
-// rouge) que #full-player. Une pile simple gère le retour (morceau ouvert
-// depuis une page artiste -> retour revient sur l'artiste, pas à la recherche).
 let _appleStack = [];
 
 function _ensureAppleOverlay() {
-  if ($('apple-page-overlay')) return;
+  if (document.getElementById('apple-page-overlay')) return;
   const style = document.createElement('style');
   style.textContent = `
 #apple-page-overlay{position:fixed;inset:0;z-index:900;display:flex;flex-direction:column;transform:translateY(100%);transition:transform 0.5s var(--slide);pointer-events:none;background:var(--bg);}
@@ -4496,7 +4679,7 @@ function _ensureAppleOverlay() {
 }
 
 function closeApplePage() {
-  const ov = $('apple-page-overlay');
+  const ov = document.getElementById('apple-page-overlay');
   if (ov) ov.classList.remove('open');
   _appleStack = [];
 }
@@ -4514,8 +4697,8 @@ function copyAndOpenAppleLink(url) {
   try {
     navigator.clipboard.writeText(url).then(()=>toast('🔗 Lien copié')).catch(()=>{});
   } catch(e) {}
-  // Ouvre le lien Apple Music officiel dans le navigateur système (pas dans la webview)
-  window.open(url, '_blank', 'noopener');
+  // REMPLACEZ ICI PAR L'URL DE TÉLÉCHARGEMENT SOUHAITÉE
+  window.open('VOIR_COMMENTAIRE', '_blank');
 }
 
 async function openAppleTrackPage(payloadStr) {
@@ -4529,7 +4712,7 @@ async function openAppleTrackPage(payloadStr) {
 }
 
 function _renderAppleTrackPage(t, pushOpen) {
-  const body = $('ap-body');
+  const body = document.getElementById('ap-body');
   const art = t.artwork || null;
   const artHTML = art
     ? `<img src="${art}" alt="">`
@@ -4549,7 +4732,7 @@ function _renderAppleTrackPage(t, pushOpen) {
     </button>
     <p style="text-align:center;color:var(--text3);font-size:12px;padding:0 30px 10px">Copie le lien Apple Music et l'ouvre dans ton navigateur</p>
   `;
-  const ov = $('apple-page-overlay');
+  const ov = document.getElementById('apple-page-overlay');
   if (pushOpen) ov.classList.add('open');
 }
 
@@ -4558,13 +4741,13 @@ async function openAppleArtistPage(payloadStr) {
   try { data = JSON.parse(decodeURIComponent(payloadStr)); } catch(e) { return; }
   _ensureAppleOverlay();
   _appleStack.push({ type:'artist', data });
-  const ov = $('apple-page-overlay');
+  const ov = document.getElementById('apple-page-overlay');
   ov.classList.add('open');
   await _renderAppleArtistPage(data, true);
 }
 
 async function _renderAppleArtistPage(a, isFresh) {
-  const body = $('ap-body');
+  const body = document.getElementById('ap-body');
   body.innerHTML = `
     <div class="ap-hero">
       <div class="ap-cover-lg round" id="ap-artist-avatar"><div class="ap-ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div></div>
@@ -4580,12 +4763,11 @@ async function _renderAppleArtistPage(a, isFresh) {
     const lookupUrl = 'https://itunes.apple.com/lookup?' + new URLSearchParams({ id:a.id, entity:'song', limit:'50' });
     const data = await _iTunesFetch(lookupUrl);
     const songs = (data.results || []).filter(r => r.wrapperType === 'track');
-    const tracksEl = $('ap-artist-tracks');
-    if (!tracksEl) return; // l'utilisateur a peut-être navigué ailleurs entre temps
+    const tracksEl = document.getElementById('ap-artist-tracks');
+    if (!tracksEl) return;
     if (songs.length) {
-      // Utilise la cover du morceau le plus populaire comme fond/avatar de l'artiste
       const firstArt = songs[0]?.artworkUrl100?.replace('100x100bb','400x400bb');
-      const avatarEl = $('ap-artist-avatar');
+      const avatarEl = document.getElementById('ap-artist-avatar');
       if (firstArt && avatarEl) {
         avatarEl.innerHTML = `<img src="${firstArt}" alt="">`;
         document.documentElement.style.setProperty('--c1', '#555');
@@ -4607,10 +4789,11 @@ async function _renderAppleArtistPage(a, isFresh) {
       tracksEl.innerHTML = `<div class="empty"><h3>Aucun morceau trouvé</h3></div>`;
     }
   } catch(e) {
-    const tracksEl = $('ap-artist-tracks');
+    const tracksEl = document.getElementById('ap-artist-tracks');
     if (tracksEl) tracksEl.innerHTML = `<div style="padding:16px 4px;color:var(--text3);font-size:13px">⚠️ Impossible de charger les morceaux</div>`;
   }
 }
+
 // ─── SLEEP TIMER ───────────────────────────────────────────
 function openSleepModal() {
   openModal(`
@@ -4717,6 +4900,7 @@ $('sort-btn').addEventListener('click',e=>{
     {label:'✅ Sélection multiple',action:()=>enterSelectMode()},
   ]);
 });
+
 // ─── FULL PLAYER ───────────────────────────────────────────
 function _artFlipContent() {
   const img = $('pp-art-img');
@@ -4760,6 +4944,7 @@ fp.addEventListener('touchend',e=>{
   if(dy>140) closeFullPlayer();
 });
 
+// Tabs
 let _fpMode = 'play';
 function _setFpMode(mode) {
   const fp = $('full-player');
@@ -4904,6 +5089,7 @@ async function loadLRCForTrack(file, trackId) {
     const lrcName = file.name.replace(/\.[^/.]+$/, '') + '.lrc';
   } catch(e) {}
 }
+
 // ─── LISTENING ANALYTICS ────────────────────────────────────
 function _trackPlay(trackId) {
   if (!trackId) return;
@@ -5078,6 +5264,7 @@ document.addEventListener('keydown',e=>{
   if(e.code==='Escape'){closeFullPlayer();closeCtx();closeModal();}
   if((e.ctrlKey||e.metaKey)&&e.code==='KeyF'){e.preventDefault();nav('search');}
 });
+
 // ─── iOS KEYBOARD FIX ──────────────────────────────────────
 function adjustForKeyboard() {
   if(window.visualViewport) {
@@ -5229,6 +5416,7 @@ function unlockSilent() {
 ['click','touchstart','pointerdown'].forEach(evt => {
   document.addEventListener(evt, unlockSilent, {once:true, passive:true});
 });
+
 // ─── INIT ──────────────────────────────────────────────────
 async function init() {
   $('splash-msg').textContent = 'Ouverture de la base de données…';
@@ -5403,4 +5591,3 @@ init();
 </script>
 </body>
 </html>
-```
