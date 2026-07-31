@@ -4561,65 +4561,81 @@ function _jsonpRequest(url, timeoutMs = 8000) {
     document.head.appendChild(script);
   });
 }
-// Appel réseau borné dans le temps : évite qu'une tentative bloquée
-// (proxy lent/mort) ne fasse attendre indéfiniment avant de passer à la
-// suivante dans la chaîne ci-dessous.
-function _fetchWithTimeout(url, ms = 6000) {
+// Appel réseau borné dans le temps, et annulable depuis l'extérieur
+// (externalSignal) — utilisé par searchAppleMusic pour couper net une
+// requête devenue obsolète dès qu'une nouvelle recherche démarre.
+function _fetchWithTimeout(url, ms = 7000, externalSignal) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
+  if (externalSignal) {
+    if (externalSignal.aborted) ctrl.abort();
+    else externalSignal.addEventListener('abort', () => ctrl.abort(), { once: true });
+  }
   return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
 }
 
 // Test décisif fait le 30/07 : naviguer directement vers l'URL de
 // recherche dans Safari propose un TÉLÉCHARGEMENT au lieu d'afficher le
 // JSON — Apple sert cette réponse avec un type "JavaScript" plutôt que
-// "texte". Ça explique deux choses : (1) JSONP ne peut pas marcher, la
-// réponse n'étant pas vraiment enveloppée dans le callback — retiré ;
-// (2) l'endpoint /raw d'AllOrigins, qui transmet tel quel le type de
-// fichier d'origine, hérite du même problème pour lire la réponse côté
-// navigateur ("The string did not match the expected pattern") — on
-// utilise donc /get, qui renvoie toujours du JSON propre (le contenu
-// d'Apple est dans data.contents, qu'on parse nous-mêmes ensuite).
-// corsproxy.io a répondu 403 : son offre gratuite est restreinte à une
-// liste fixe d'hébergeurs (GitHub Pages, etc.) qui n'inclut pas le tien —
-// retenter ne changera rien, il est retiré.
-async function _iTunesFetch(url) {
-  const attempts = [
+// "texte". Ça explique pourquoi JSONP ne peut pas marcher (retiré) et
+// pourquoi l'endpoint /raw d'AllOrigins avait du mal à lire la réponse
+// (on utilise /get, qui renvoie toujours du JSON propre dans data.contents).
+// corsproxy.io a été retiré (403 : offre gratuite restreinte à une liste
+// d'hébergeurs qui n'inclut pas le tien, ça ne passera jamais).
+//
+// Les 4 méthodes restantes partent maintenant TOUTES EN MÊME TEMPS
+// (Promise.any) plutôt que l'une après l'autre : on prend la première
+// qui répond correctement, sans attendre que les précédentes échouent
+// d'abord. C'est ce qui rend la recherche à la fois plus rapide (bornée
+// par la plus rapide des 4, pas par la somme de leurs délais) et plus
+// fiable (4 chances en même temps plutôt qu'une seule à la fois).
+async function _iTunesFetch(url, externalSignal) {
+  const candidates = [
     { name: 'proxy AllOrigins', run: async () => {
-        const r = await _fetchWithTimeout('https://api.allorigins.win/get?url=' + encodeURIComponent(url), 10000);
+        const r = await _fetchWithTimeout('https://api.allorigins.win/get?url=' + encodeURIComponent(url), 7000, externalSignal);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const wrapper = await r.json();
-        if (!wrapper || typeof wrapper.contents !== 'string') throw new Error('réponse AllOrigins vide/invalide');
+        if (!wrapper || typeof wrapper.contents !== 'string') throw new Error('réponse vide/invalide');
         return JSON.parse(wrapper.contents);
       } },
-    { name: 'proxy codetabs', run: () => _fetchWithTimeout('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url), 10000).then(r => {
+    { name: 'proxy codetabs', run: async () => {
+        const r = await _fetchWithTimeout('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(url), 7000, externalSignal);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
-      }) },
-    { name: 'proxy thingproxy', run: () => _fetchWithTimeout('https://thingproxy.freeboard.io/fetch/' + url, 10000).then(r => {
+      } },
+    { name: 'proxy thingproxy', run: async () => {
+        const r = await _fetchWithTimeout('https://thingproxy.freeboard.io/fetch/' + url, 7000, externalSignal);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
-      }) },
-    { name: 'fetch direct', run: () => _fetchWithTimeout(url, 6000).then(r => {
+      } },
+    { name: 'fetch direct', run: async () => {
+        const r = await _fetchWithTimeout(url, 6000, externalSignal);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
-      }) },
+      } },
   ];
-  let lastErr = null;
-  for (const attempt of attempts) {
-    try {
-      const data = await attempt.run();
-      // Garde-fou : une réponse mal formée (page d'erreur HTML servie par
-      // un proxy, par exemple) ne doit pas être confondue avec un succès.
-      if (data && Array.isArray(data.results)) return data;
-      throw new Error('réponse inattendue (pas de champ results exploitable)');
-    } catch(e) {
-      lastErr = e;
-      console.warn('[iTunes] ' + attempt.name + ' a échoué: ' + (e && e.message), url);
+
+  const tasks = candidates.map(c => (async () => {
+    const data = await c.run();
+    if (!data || !Array.isArray(data.results)) throw new Error('réponse inattendue (pas de champ results exploitable)');
+    console.log('[iTunes] succès via ' + c.name);
+    return data;
+  })().catch(e => {
+    console.warn('[iTunes] ' + c.name + ' a échoué: ' + (e && e.message), url);
+    throw e;
+  }));
+
+  try {
+    return await Promise.any(tasks);
+  } catch(aggErr) {
+    if (externalSignal && externalSignal.aborted) {
+      const abortErr = new Error('recherche annulée (supplantée par une plus récente)');
+      abortErr.name = 'AbortError';
+      throw abortErr;
     }
+    console.error('[iTunes] les 4 méthodes ont échoué pour', url);
+    throw (aggErr && aggErr.errors && aggErr.errors[0]) || new Error('iTunes: toutes les méthodes ont échoué');
   }
-  console.error('[iTunes] les 4 méthodes ont échoué pour', url, lastErr);
-  throw lastErr || new Error('iTunes: toutes les méthodes ont échoué');
 }
 
 async function _loadAppleLinks() {
@@ -4636,6 +4652,7 @@ function searchAppleMusicDebounced(q) {
   _appleSearchTimer = setTimeout(() => searchAppleMusic(q), 420);
 }
 
+let _appleSearchAbortCtrl = null;
 async function searchAppleMusic(q) {
   const gen = ++_appleSearchGen;
   const sec = $('apple-search-section');
@@ -4645,6 +4662,14 @@ async function searchAppleMusic(q) {
   sec.style.display = 'block';
   songsEl.innerHTML = `<div style="padding:14px 20px;color:var(--text3);font-size:13px">Recherche…</div>`;
   artistsEl.innerHTML = '';
+  // Annule la recherche précédente si elle est encore en vol : sans ça,
+  // taper vite fait s'accumuler plusieurs requêtes réseau simultanées
+  // (chacune passant par un proxy potentiellement lent) qui se gênent
+  // mutuellement et donnent une impression de lenteur qui s'aggrave à
+  // chaque frappe.
+  if (_appleSearchAbortCtrl) _appleSearchAbortCtrl.abort();
+  _appleSearchAbortCtrl = new AbortController();
+  const mySignal = _appleSearchAbortCtrl.signal;
   // Note : on ne recherche PAS avec entity=musicArtist — cette entité de
   // l'API iTunes Search est connue pour renvoyer des résultats vides ou
   // très pauvres, y compris pour des artistes très connus (limitation
@@ -4653,17 +4678,24 @@ async function searchAppleMusic(q) {
   // (entity=song), qui est le point d'entrée fiable de cette API.
   try {
     const songsUrl = 'https://itunes.apple.com/search?' + new URLSearchParams({ term:q, media:'music', entity:'song', limit:'20' });
-    const songsData = await _iTunesFetch(songsUrl);
+    const songsData = await _iTunesFetch(songsUrl, mySignal);
     if (gen !== _appleSearchGen) return;
     const songs = songsData.results || [];
 
-    // Artistes uniques extraits des résultats de chansons (max 8, dans l'ordre d'apparition)
+    // Artistes uniques extraits des résultats de chansons (max 8, dans
+    // l'ordre d'apparition), avec la pochette et le lien Apple Music déjà
+    // disponibles ici — pour que la page artiste s'affiche instantanément
+    // sans devoir attendre un second aller-retour réseau juste pour la photo.
     const seen = new Set();
     const artistsList = [];
     for (const t of songs) {
       if (!t.artistId || !t.artistName || seen.has(t.artistId)) continue;
       seen.add(t.artistId);
-      artistsList.push({ artistId:t.artistId, artistName:t.artistName, primaryGenreName:t.primaryGenreName||'' });
+      artistsList.push({
+        artistId:t.artistId, artistName:t.artistName, primaryGenreName:t.primaryGenreName||'',
+        artwork: t.artworkUrl100 ? t.artworkUrl100.replace('100x100bb','400x400bb') : null,
+        artistViewUrl: t.artistViewUrl || null
+      });
       if (artistsList.length >= 8) break;
     }
 
@@ -4677,20 +4709,19 @@ async function searchAppleMusic(q) {
       : `<div style="padding:16px 20px;color:var(--text3);font-size:13px">Aucun résultat pour « ${esc(q)} » sur Apple Music</div>`;
   } catch(e) {
     if (gen !== _appleSearchGen) return;
-    // Diagnostic visible en console — ouvrir l'inspecteur Safari distant
-    // (Réglages > Safari > Avancé > Inspecteur web, relié à un Mac) montre
-    // le vrai motif d'échec (timeout JSONP, erreur de script, statut HTTP).
+    if (e && e.name === 'AbortError') return; // recherche supplantée par une plus récente, rien à afficher
     console.error('[Apple Music search] échec réseau:', e && (e.message || e));
     songsEl.innerHTML = `<div style="padding:16px 20px;color:var(--text3);font-size:13px">⚠️ Connexion à Apple Music impossible — vérifie ta connexion (détail dans la console)</div>`;
   }
 }
 
 function appleArtistCardHTML(a) {
-  const payload = encodeURIComponent(JSON.stringify({ id:a.artistId, name:a.artistName, genre:a.primaryGenreName||'' }));
+  const payload = encodeURIComponent(JSON.stringify({ id:a.artistId, name:a.artistName, genre:a.primaryGenreName||'', artwork:a.artwork||null, viewUrl:a.artistViewUrl||null }));
+  const artHTML = a.artwork
+    ? `<img src="${a.artwork}" alt="" loading="lazy" style="width:100%;height:100%;object-fit:cover">`
+    : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:40%;height:40%;opacity:0.6;color:#fff"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>`;
   return `<div class="card album-card" onclick="openAppleArtistPage('${payload}')">
-    <div class="cthumb" style="border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,rgba(252,60,68,0.35),rgba(26,26,46,0.85))">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width:40%;height:40%;opacity:0.6;color:#fff"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-    </div>
+    <div class="cthumb" style="border-radius:50%;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,rgba(252,60,68,0.35),rgba(26,26,46,0.85))">${artHTML}</div>
     <div class="ctitle">${esc(a.artistName)}</div>
     <div class="csub">Artiste</div>
   </div>`;
@@ -4702,7 +4733,8 @@ function appleResultHTML(t) {
   const artHTML = art ? `<img src="${art}" alt="" loading="lazy">` : `<div class="tart-ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 19V6l12-3v13"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>`;
   const payload = encodeURIComponent(JSON.stringify({
     id:t.trackId, title:t.trackName, artist:t.artistName, artistId:t.artistId, album:t.collectionName,
-    artwork:art, url:t.trackViewUrl, genre:t.primaryGenreName||''
+    artwork:art, url:t.trackViewUrl, genre:t.primaryGenreName||'', preview:t.previewUrl||null,
+    artistArtwork: art, artistViewUrl:t.artistViewUrl||null
   }));
   return `<div class="titem" onclick="openAppleTrackPage('${payload}')">
     <div class="tart">${artHTML}</div>
@@ -4720,6 +4752,7 @@ function appleResultHTML(t) {
 // rouge) que #full-player. Une pile simple gère le retour (morceau ouvert
 // depuis une page artiste -> retour revient sur l'artiste, pas à la recherche).
 let _appleStack = [];
+let _artistTracksCache = {}; // { artistId: songs[] } — évite de re-télécharger la liste d'un artiste déjà consulté
 
 function _ensureAppleOverlay() {
   if ($('apple-page-overlay')) return;
@@ -4728,7 +4761,8 @@ function _ensureAppleOverlay() {
 #apple-page-overlay{position:fixed;inset:0;z-index:900;display:flex;flex-direction:column;transform:translateY(100%);transition:transform 0.5s var(--slide);pointer-events:none;background:var(--bg);}
 #apple-page-overlay.open{transform:translateY(0);pointer-events:all;}
 #ap-bg{position:absolute;inset:-20%;z-index:-1;filter:blur(60px) saturate(1.4) brightness(0.75);opacity:0.85;background:radial-gradient(ellipse at 30% 20%,var(--c1) 0%,transparent 55%),radial-gradient(ellipse at 70% 70%,var(--c2) 0%,transparent 55%);transition:background 0.5s ease;}
-#ap-hd{display:flex;align-items:center;justify-content:space-between;padding:calc(var(--safe-t) + 14px) 18px 10px;position:relative;z-index:2;}
+#ap-hd{display:flex;align-items:center;padding:calc(var(--safe-t) + 14px) 18px 10px;position:relative;z-index:2;}
+#ap-hd .ph-title-label{flex:1;text-align:center;font-size:13px;font-weight:700;color:var(--text2);letter-spacing:0.3px;margin-right:34px;}
 #ap-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;padding-bottom:calc(var(--safe-b) + 40px);}
 #ap-body::-webkit-scrollbar{display:none;}
 .ap-hero{display:flex;flex-direction:column;align-items:center;text-align:center;padding:10px 24px 26px;}
@@ -4741,11 +4775,19 @@ function _ensureAppleOverlay() {
 .ap-sub-lg{font-size:16px;color:var(--text2);margin-top:6px;cursor:pointer;}
 .ap-sub-lg.link{color:var(--accent);font-weight:600;}
 .ap-genre-pill{display:inline-flex;margin-top:12px;padding:5px 12px;border-radius:20px;background:var(--surface2);font-size:11px;font-weight:700;color:var(--text2);letter-spacing:0.3px;}
-.ap-dl-btn{display:flex;align-items:center;justify-content:center;gap:10px;margin:22px 24px 6px;padding:15px;border-radius:var(--r-md);border:none;background:var(--accent);color:#fff;font-size:15.5px;font-weight:700;cursor:pointer;font-family:var(--font);transition:opacity 0.2s,transform 0.15s var(--spring);}
-.ap-dl-btn:active{transform:scale(0.97);opacity:0.85;}
-.ap-dl-btn svg{width:19px;height:19px;}
-.ap-meta-row{display:flex;justify-content:center;gap:18px;margin-top:8px;font-size:12.5px;color:var(--text3);}
 .ap-section-title{font-size:17px;font-weight:700;padding:22px 20px 12px;}
+/* Rangée de boutons ronds façon Apple Music (aperçu/lecture au centre en
+   grand, actions secondaires plus petites autour) — même rythme visuel
+   que la page artiste (i / lecture / étoile), pour une cohérence totale. */
+.ap-btn-row{display:flex;align-items:center;justify-content:center;gap:22px;padding:4px 24px 10px;}
+.ap-circle-btn{width:52px;height:52px;border-radius:50%;border:none;background:var(--surface2);color:var(--text1);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:transform 0.15s var(--spring),background 0.2s;}
+.ap-circle-btn:active{transform:scale(0.9);}
+.ap-circle-btn svg{width:22px;height:22px;}
+.ap-circle-btn.main{width:74px;height:74px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.4);}
+.ap-circle-btn.main svg{width:28px;height:28px;}
+.ap-view-btn{display:flex;align-items:center;justify-content:center;gap:8px;margin:14px 24px 4px;padding:12px;border-radius:var(--r-md);border:1px solid var(--glass-border);background:var(--surface);color:var(--text1);font-size:14px;font-weight:600;cursor:pointer;font-family:var(--font);transition:opacity 0.2s,transform 0.15s var(--spring);}
+.ap-view-btn:active{transform:scale(0.97);opacity:0.85;}
+.ap-view-btn svg{width:16px;height:16px;color:var(--accent);}
 `;
   document.head.appendChild(style);
 
@@ -4755,8 +4797,7 @@ function _ensureAppleOverlay() {
     <div id="ap-bg"></div>
     <div id="ap-hd">
       <button class="icon-btn" onclick="appleGoBack()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg></button>
-      <div style="font-size:13px;font-weight:700;color:var(--text2);letter-spacing:0.3px">APPLE MUSIC</div>
-      <button class="icon-btn" onclick="closeApplePage()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <div class="ph-title-label">APPLE MUSIC</div>
     </div>
     <div id="ap-body"></div>
   `;
@@ -4767,10 +4808,12 @@ function closeApplePage() {
   const ov = $('apple-page-overlay');
   if (ov) ov.classList.remove('open');
   _appleStack = [];
+  _stopApPreview();
 }
 
 function appleGoBack() {
   if (_appleStack.length <= 1) { closeApplePage(); return; }
+  _stopApPreview();
   _appleStack.pop();
   const prev = _appleStack[_appleStack.length - 1];
   if (prev.type === 'artist') _renderAppleArtistPage(prev.data, false);
@@ -4782,13 +4825,63 @@ function copyAndOpenAppleLink(url) {
   try {
     navigator.clipboard.writeText(url).then(()=>toast('🔗 Lien copié')).catch(()=>{});
   } catch(e) {}
-  // Ouvre le lien Apple Music officiel dans le navigateur système (pas dans la webview)
-  window.open(url, '_blank', 'noopener');
+  _openExternal(url);
+}
+// Ouvre un lien dans le navigateur système. Un <a>.click() est plus fiable
+// que window.open() pour échapper vers Safari depuis une PWA en mode
+// standalone sur iOS — window.open() y provoque parfois un flash de page
+// blanche dans l'app avant la redirection.
+function _openExternal(url) {
+  if (!url) return;
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// ─── APERÇU 30 SECONDES ──────────────────────────────────────
+// Lecteur dédié, totalement séparé de la lecture de la bibliothèque
+// locale (l'élément <video> `audio` géré plus haut) pour ne jamais
+// interférer avec ce que l'utilisateur écoute déjà.
+let _apPreviewAudio = null;
+let _apPreviewPlayingId = null;
+function _ensureApPreviewAudio() {
+  if (_apPreviewAudio) return _apPreviewAudio;
+  _apPreviewAudio = new Audio();
+  _apPreviewAudio.preload = 'none';
+  _apPreviewAudio.addEventListener('ended', () => { _apPreviewPlayingId = null; _updateApPreviewBtn(); });
+  _apPreviewAudio.addEventListener('pause', _updateApPreviewBtn);
+  _apPreviewAudio.addEventListener('play', _updateApPreviewBtn);
+  return _apPreviewAudio;
+}
+function _stopApPreview() {
+  if (_apPreviewAudio) { _apPreviewAudio.pause(); _apPreviewAudio.removeAttribute('src'); }
+  _apPreviewPlayingId = null;
+}
+function toggleApPreview(trackId, previewUrl) {
+  const el = _ensureApPreviewAudio();
+  if (_apPreviewPlayingId === trackId && !el.paused) { el.pause(); return; }
+  if (!previewUrl) { toast('⚠️ Aperçu non disponible pour ce morceau'); return; }
+  if (_apPreviewPlayingId !== trackId) el.src = previewUrl;
+  _apPreviewPlayingId = trackId;
+  el.play().catch(()=>toast('⚠️ Lecture de l\'aperçu impossible'));
+}
+function _updateApPreviewBtn() {
+  const btn = $('ap-preview-btn');
+  if (!btn) return;
+  const playing = _apPreviewAudio && !_apPreviewAudio.paused && _apPreviewPlayingId === btn.dataset.trackId;
+  btn.innerHTML = playing
+    ? `<svg viewBox="0 0 24 24" fill="#000"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`
+    : `<svg viewBox="0 0 24 24" fill="#000"><path d="M8 5v14l11-7z"/></svg>`;
 }
 
 async function openAppleTrackPage(payloadStr) {
   let data;
   try { data = JSON.parse(decodeURIComponent(payloadStr)); } catch(e) { return; }
+  _stopApPreview();
   appleLinks[data.id] = data;
   _saveAppleLinks();
   _ensureAppleOverlay();
@@ -4802,28 +4895,56 @@ function _renderAppleTrackPage(t, pushOpen) {
   const artHTML = art
     ? `<img src="${art}" alt="">`
     : `<div class="ap-ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 19V6l12-3v13"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>`;
-  const artistPayload = encodeURIComponent(JSON.stringify({ id:t.artistId, name:t.artist, genre:t.genre||'' }));
+  const artistPayload = encodeURIComponent(JSON.stringify({ id:t.artistId, name:t.artist, genre:t.genre||'', artwork:t.artistArtwork||t.artwork||null, viewUrl:t.artistViewUrl||null }));
+  const isThisPlaying = _apPreviewPlayingId === t.id && _apPreviewAudio && !_apPreviewAudio.paused;
+  const playIcon = isThisPlaying
+    ? `<svg viewBox="0 0 24 24" fill="#000"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`
+    : `<svg viewBox="0 0 24 24" fill="#000"><path d="M8 5v14l11-7z"/></svg>`;
   body.innerHTML = `
     <div class="ap-hero">
       <div class="ap-cover-lg">${artHTML}</div>
       <div class="ap-title-lg">${esc(t.title||'')}</div>
       <div class="ap-sub-lg link" onclick="openAppleArtistPage('${artistPayload}')">${esc(t.artist||'')}</div>
       ${t.album ? `<div class="ap-sub-lg" style="font-size:14px">${esc(t.album)}</div>` : ''}
-      ${t.genre ? `<div class="ap-genre-pill">${esc(t.genre)}</div>` : ''}
     </div>
-    <button class="ap-dl-btn" onclick="copyAndOpenAppleLink('${(t.url||'').replace(/'/g,"\\'")}')">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Télécharger
-    </button>
-    <p style="text-align:center;color:var(--text3);font-size:12px;padding:0 30px 10px">Copie le lien Apple Music et l'ouvre dans ton navigateur</p>
+    <div class="ap-btn-row">
+      <button class="ap-circle-btn" title="Copier le lien et ouvrir Apple Music" onclick="copyAndOpenAppleLink('${(t.url||'').replace(/'/g,"\\'")}')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      </button>
+      <button class="ap-circle-btn main" id="ap-preview-btn" data-track-id="${t.id}" title="Écouter l'aperçu (30s)" onclick="toggleApPreview(${JSON.stringify(t.id)}, ${JSON.stringify(t.preview||null)})">${playIcon}</button>
+      <div class="ap-circle-btn" style="opacity:0;pointer-events:none"></div>
+    </div>
+    <div id="ap-more-section"></div>
   `;
   const ov = $('apple-page-overlay');
   if (pushOpen) ov.classList.add('open');
+  _renderApMoreByArtist(t);
+}
+
+// "Plus de [Artiste]" — quelques autres morceaux du même artiste sous la
+// page du morceau, comme sur Apple Music. Réutilise le cache par artiste
+// pour ne pas re-télécharger si son propre morceau ou sa page ont déjà
+// été consultés dans cette session.
+async function _renderApMoreByArtist(t) {
+  const holder = $('ap-more-section');
+  if (!holder || !t.artistId) return;
+  holder.innerHTML = `<div class="ap-section-title">Plus de ${esc(t.artist||'')}</div><div style="padding:4px 20px;color:var(--text3);font-size:13px">Chargement…</div>`;
+  try {
+    const songs = await _fetchArtistTracks(t.artistId);
+    if (!$('ap-more-section')) return; // la page a changé entre-temps
+    const others = songs.filter(s => s.trackId !== t.id).slice(0, 8);
+    if (!others.length) { holder.innerHTML = ''; return; }
+    holder.innerHTML = `<div class="ap-section-title">Plus de ${esc(t.artist||'')}</div>
+      <div class="tlist">${others.map(s => appleResultHTML(s)).join('')}</div>`;
+  } catch(e) {
+    if ($('ap-more-section')) holder.innerHTML = '';
+  }
 }
 
 async function openAppleArtistPage(payloadStr) {
   let data;
   try { data = JSON.parse(decodeURIComponent(payloadStr)); } catch(e) { return; }
+  _stopApPreview();
   _ensureAppleOverlay();
   _appleStack.push({ type:'artist', data });
   const ov = $('apple-page-overlay');
@@ -4831,39 +4952,51 @@ async function openAppleArtistPage(payloadStr) {
   await _renderAppleArtistPage(data, true);
 }
 
+async function _fetchArtistTracks(artistId) {
+  if (_artistTracksCache[artistId]) return _artistTracksCache[artistId];
+  const lookupUrl = 'https://itunes.apple.com/lookup?' + new URLSearchParams({ id:artistId, entity:'song', limit:'50' });
+  const data = await _iTunesFetch(lookupUrl);
+  const songs = (data.results || []).filter(r => r.wrapperType === 'track');
+  _artistTracksCache[artistId] = songs;
+  return songs;
+}
+
 async function _renderAppleArtistPage(a, isFresh) {
   const body = $('ap-body');
+  // Photo affichée immédiatement : elle vient des résultats de recherche
+  // déjà en mémoire (voir searchAppleMusic), donc pas d'attente réseau
+  // avant de la voir apparaître.
+  const avatarHTML = a.artwork
+    ? `<img src="${a.artwork}" alt="">`
+    : `<div class="ap-ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>`;
+  const viewUrl = a.viewUrl || ('https://music.apple.com/search?term=' + encodeURIComponent(a.name||''));
   body.innerHTML = `
     <div class="ap-hero">
-      <div class="ap-cover-lg round" id="ap-artist-avatar"><div class="ap-ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div></div>
+      <div class="ap-cover-lg round" id="ap-artist-avatar">${avatarHTML}</div>
       <div class="ap-title-lg">${esc(a.name||'')}</div>
       ${a.genre ? `<div class="ap-genre-pill">${esc(a.genre)}</div>` : ''}
     </div>
+    <button class="ap-view-btn" onclick="_openExternal('${viewUrl.replace(/'/g,"\\'")}')">
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 42V22l26-7v22" stroke="currentColor" fill="none" stroke-width="0"/><circle cx="12" cy="12" r="10"/></svg>
+      Voir sur Apple Music
+    </button>
     <div class="ap-section-title">Morceaux</div>
     <div id="ap-artist-tracks" class="tlist" style="padding:0 16px">
       <div style="padding:16px 4px;color:var(--text3);font-size:13px">Chargement…</div>
     </div>
   `;
   try {
-    const lookupUrl = 'https://itunes.apple.com/lookup?' + new URLSearchParams({ id:a.id, entity:'song', limit:'50' });
-    const data = await _iTunesFetch(lookupUrl);
-    const songs = (data.results || []).filter(r => r.wrapperType === 'track');
+    const songs = await _fetchArtistTracks(a.id);
     const tracksEl = $('ap-artist-tracks');
     if (!tracksEl) return; // l'utilisateur a peut-être navigué ailleurs entre temps
     if (songs.length) {
-      // Utilise la cover du morceau le plus populaire comme fond/avatar de l'artiste
-      const firstArt = songs[0]?.artworkUrl100?.replace('100x100bb','400x400bb');
-      const avatarEl = $('ap-artist-avatar');
-      if (firstArt && avatarEl) {
-        avatarEl.innerHTML = `<img src="${firstArt}" alt="">`;
-        document.documentElement.style.setProperty('--c1', '#555');
-      }
       tracksEl.innerHTML = songs.map(t => {
         const art = t.artworkUrl100 ? t.artworkUrl100.replace('100x100bb','300x300bb') : null;
         const artHTML = art ? `<img src="${art}" alt="" loading="lazy">` : `<div class="tart-ph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 19V6l12-3v13"/><circle cx="6" cy="19" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>`;
         const payload = encodeURIComponent(JSON.stringify({
           id:t.trackId, title:t.trackName, artist:t.artistName, artistId:t.artistId, album:t.collectionName,
-          artwork:art, url:t.trackViewUrl, genre:t.primaryGenreName||''
+          artwork:art, url:t.trackViewUrl, genre:t.primaryGenreName||'', preview:t.previewUrl||null,
+          artistArtwork:a.artwork||null, artistViewUrl:a.viewUrl||null
         }));
         return `<div class="titem" onclick="openAppleTrackPage('${payload}')">
           <div class="tart">${artHTML}</div>
