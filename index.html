@@ -5849,5 +5849,25 @@ init();
     });
   }
 </script>
+<!-- CONSOLE MOBILE (Eruda) -->
+<button id="debug-console-btn" style="position:fixed; bottom:20px; left:20px; z-index:99999; width:46px; height:46px; border-radius:50%; background:#fc3c44; color:#fff; font-size:20px; border:none; box-shadow:0 4px 14px rgba(0,0,0,0.6); cursor:pointer;">🐞</button>
+<script>
+  (function(){
+    var btn = document.getElementById('debug-console-btn');
+    var erudaLoaded = false;
+    btn.addEventListener('click', function(){
+      if(!erudaLoaded){
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/eruda';
+        s.onload = function(){
+          eruda.init();
+          erudaLoaded = true;
+          btn.style.display = 'none'; // Cache le bouton une fois la console ouverte
+        };
+        document.head.appendChild(s);
+      }
+    });
+  })();
+</script>
 </body>
 </html>
